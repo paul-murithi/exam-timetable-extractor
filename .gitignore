@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints
+*.pyc
+.env
+Final-Bachelor's-Virtual-Exam-Timetable-Dec 2025.xlsx
+streamlit-env/
+archive/
+data/
