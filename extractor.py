@@ -4,6 +4,7 @@ from io import BytesIO
 import re
 
 st.title("MKU Exam Extractor")
+st.subheader("Only works for Undergraduate (Bachelor's and Diploma) exam timetables. File uploaded must be in Excel format.")
 st.write("Upload your exam timetable Excel file and select your units.")
 
 uploaded_file = st.file_uploader("Choose Excel file", type=["xlsx"])
