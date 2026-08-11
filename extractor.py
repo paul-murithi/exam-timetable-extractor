@@ -4,6 +4,12 @@ import numpy as np
 import datetime
 from io import BytesIO
 import re
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # ==========================================
 # 1. Normalization & Helper Functions
@@ -24,7 +30,6 @@ def normalize_cell_value(val):
 def normalize_column_name(name):
     """Normalizes column header text for fuzzy keyword matching."""
     s = normalize_cell_value(name).upper()
-    # Replace punctuation and special characters with spaces
     s = re.sub(r'[\s_\-/&,.():]+', ' ', s).strip()
     return s
 
@@ -72,11 +77,9 @@ def score_header_row(row_values):
             continue
         
         best_cat = None
-        # Try matching defined keyword map
         for cat, keywords in KEYWORD_MAP.items():
             for kw in keywords:
                 if norm_cell == kw or kw in norm_cell:
-                    # Avoid matching postal code or zip code as course code
                     if cat == 'COURSE_CODE' and any(bad in norm_cell for bad in ['POSTAL', 'ZIP', 'COUNTRY', 'AREA']):
                         continue
                     best_cat = cat
@@ -100,7 +103,6 @@ def score_header_row(row_values):
     if 'VENUE' in matched_cols:
         score += 1
 
-    # Must contain course code category to be a valid header
     if 'COURSE_CODE' not in matched_cols:
         score = 0
         
@@ -135,7 +137,6 @@ def detect_header_row(df_raw, max_rows=100):
 def clean_date(date_val):
     """
     Standardizes date values into consistent date objects or cleaned string representation.
-    Handles Excel datetimes, pandas timestamps, day names, ordinal suffixes, ranges, etc.
     """
     if pd.isna(date_val) or date_val is None:
         return None
@@ -148,7 +149,6 @@ def clean_date(date_val):
     if not d_str or d_str.lower() in ("nan", "none", "null", "nat", "<na>"):
         return None
 
-    # ISO date match e.g. 2026-08-10 00:00:00 or 2026-08-10
     m_iso = re.match(r'^(\d{4}-\d{2}-\d{2})', d_str)
     if m_iso:
         try:
@@ -156,11 +156,9 @@ def clean_date(date_val):
         except Exception:
             pass
 
-    # Check for date ranges like '17th - 22nd Aug' or '17/08 - 22/08'
     if re.search(r'\d+(?:st|nd|rd|th)?\s*-\s*\d+(?:st|nd|rd|th)?', d_str, re.IGNORECASE) or ' TO ' in d_str.upper():
         return d_str
 
-    # Clean leading day names and ordinals
     cleaned = re.sub(
         r'^(MON|TUE|WED|THU|THUR|FRI|SAT|SUN|MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)\s+',
         '', d_str, flags=re.IGNORECASE
@@ -183,7 +181,6 @@ def clean_date(date_val):
 def clean_time(time_val):
     """
     Standardizes time or session values into clean display strings.
-    Handles Excel time objects, strings, session names ('Morning', 'ONLINE'), formats ('8.00 AM', '08:00-11:00').
     """
     if pd.isna(time_val) or time_val is None:
         return ""
@@ -194,11 +191,8 @@ def clean_time(time_val):
     t_str = str(time_val).strip()
     if not t_str or t_str.lower() in ("nan", "none", "null", "nat", "<na>"):
         return ""
-    # Convert dots in times like "8.00 AM" to "8:00 AM"
     t_str = re.sub(r'(\d{1,2})\.(\d{2})', r'\1:\2', t_str)
-    # Add spacing around hyphens
     t_str = re.sub(r'(?<=[0-9A-Za-z])\s*-\s*(?=[0-9A-Za-z])', ' - ', t_str)
-    # Spacing before AM/PM
     t_str = re.sub(r'(\d{1,2}:\d{2})\s*([AP]M)', r'\1 \2', t_str, flags=re.IGNORECASE)
     return t_str
 
@@ -208,7 +202,6 @@ CODE_REGEX = r'([A-Za-z]{2,6}\s*[-_]?\s*\d{3,5}[A-Za-z]?)'
 def extract_course_code_and_title(code_val, title_val=None):
     """
     Extracts canonical unit code and unit title.
-    Intelligently splits combined code/title columns if necessary.
     """
     code_str = str(code_val).strip() if pd.notna(code_val) and code_val is not None else ""
     title_str = str(title_val).strip() if pd.notna(title_val) and title_val is not None else ""
@@ -219,17 +212,14 @@ def extract_course_code_and_title(code_val, title_val=None):
     match = re.search(CODE_REGEX, code_str)
     if match:
         extracted_code = match.group(1).upper()
-        # Compact internal code spacing while preserving format (e.g. BAF 3111 -> BAF3111 or BAF 3111)
         extracted_code = re.sub(r'\s+', '', extracted_code)
         
-        # If title is empty, check if remainder of code_str holds the title
         if not title_str or title_str.lower() in ("nan", "none", "null", "<na>"):
             remains = code_str.replace(match.group(1), '').strip(' -:;,')
             if len(remains) > 2:
                 title_str = remains
         return extracted_code, title_str
     else:
-        # Preserve original string as code if it is a reasonable short code (<= 20 chars) and not header/footer text
         if len(code_str) <= 20 and not re.search(r'\b(EXAM|SCHEDULE|PAGE|TOTAL|DATE|TIME|SNO|NO|CODE|TITLE|DAY|ROOM|VENUE)\b', code_str, re.IGNORECASE):
             return code_str.upper(), title_str
         return "", title_str
@@ -242,7 +232,6 @@ def extract_course_code_and_title(code_val, title_val=None):
 def detect_timetable_sheets(file_bytes, filename=""):
     """
     Inspects workbook sheets and scores candidates to find timetable sheets.
-    Returns (excel_file, sheet_scores_dict, best_sheet_name).
     """
     try:
         xl = pd.ExcelFile(BytesIO(file_bytes))
@@ -274,7 +263,6 @@ def clean_timetable(df_raw, header_row_idx, cat_map):
     """
     Processes raw dataframe slice from header_row_idx onwards into a clean exam timetable DataFrame.
     """
-    # Rename columns based on header mapping
     new_cols = {}
     for col_idx in range(df_raw.shape[1]):
         if col_idx in cat_map:
@@ -284,7 +272,6 @@ def clean_timetable(df_raw, header_row_idx, cat_map):
 
     data_df = df_raw.iloc[header_row_idx + 1:].rename(columns=new_cols).copy()
 
-    # Forward fill date and time fields to handle vertically merged cells
     for col in ['EXAMS_DATE', 'SESSION_TIME']:
         if col in data_df.columns:
             data_df[col] = data_df[col].ffill()
@@ -298,7 +285,6 @@ def clean_timetable(df_raw, header_row_idx, cat_map):
 
         code, title = extract_course_code_and_title(raw_code, raw_title)
 
-        # Skip rows without valid code or header artifacts
         if not code or code.upper() in header_words:
             continue
 
@@ -322,7 +308,6 @@ def clean_timetable(df_raw, header_row_idx, cat_map):
 
     df_clean = pd.DataFrame(processed_records)
     if not df_clean.empty:
-        # Drop duplicates if identical rows exist
         df_clean = df_clean.drop_duplicates(subset=['COURSE_CODE', 'EXAMS_DATE', 'SESSION_TIME', 'COURSE_TITLE'])
     return df_clean
 
@@ -330,7 +315,6 @@ def clean_timetable(df_raw, header_row_idx, cat_map):
 def load_data(file_input, sheet_name=None):
     """
     Main loader function: reads spreadsheet, detects header, normalizes columns and cleans timetable records.
-    Returns (df_clean, detected_sheet_name, header_row_index, all_sheets_info).
     """
     if isinstance(file_input, bytes):
         file_bytes = file_input
@@ -339,14 +323,12 @@ def load_data(file_input, sheet_name=None):
         file_bytes = file_input.read()
 
     xl, sheet_scores, best_sheet = detect_timetable_sheets(file_bytes)
-
     selected_sheet = sheet_name if sheet_name and sheet_name in xl.sheet_names else best_sheet
 
     if not selected_sheet:
         raise ValueError("Workbook contains no readable sheets.")
 
     df_raw = pd.read_excel(xl, sheet_name=selected_sheet, header=None)
-
     header_row_idx, score, cat_map = detect_header_row(df_raw)
 
     if header_row_idx is None or score < 2:
@@ -356,12 +338,209 @@ def load_data(file_input, sheet_name=None):
         )
 
     df_clean = clean_timetable(df_raw, header_row_idx, cat_map)
-
     return df_clean, selected_sheet, header_row_idx, xl.sheet_names
 
 
 # ==========================================
-# 4. Streamlit User Interface
+# 4. Export & Download Format Helpers
+# ==========================================
+
+def create_excel_download(df):
+    """
+    Generates a beautifully formatted Excel workbook BytesIO buffer with auto-filters, custom column widths, and print setup.
+    """
+    cols = [c for c in ["EXAMS_DATE", "SESSION_TIME", "COURSE_CODE", "COURSE_TITLE", "VENUE"] if c in df.columns]
+    df_export = df[cols].copy()
+
+    if "EXAMS_DATE" in df_export.columns:
+        df_export["EXAMS_DATE"] = df_export["EXAMS_DATE"].apply(
+            lambda d: d.strftime("%d/%m/%Y") if isinstance(d, (datetime.date, datetime.datetime)) else (str(d) if pd.notna(d) and d is not None else "")
+        )
+
+    col_rename = {
+        "EXAMS_DATE": "Exam Date",
+        "SESSION_TIME": "Session Time",
+        "COURSE_CODE": "Course Code",
+        "COURSE_TITLE": "Course Title",
+        "VENUE": "Venue"
+    }
+    df_export.rename(columns=col_rename, inplace=True)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Exam Timetable")
+
+    buffer.seek(0)
+    wb = openpyxl.load_workbook(buffer)
+    ws = wb.active
+
+    col_widths = {
+        "A": 15,  # Exam Date
+        "B": 15,  # Session Time
+        "C": 16,  # Course Code
+        "D": 42,  # Course Title
+        "E": 25   # Venue
+    }
+    for col_letter, width in col_widths.items():
+        ws.column_dimensions[col_letter].width = width
+
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.row_dimensions[1].height = 28
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    body_font = Font(name="Calibri", size=11)
+    thin_border = Border(
+        left=Side(style="thin", color="D9D9D9"),
+        right=Side(style="thin", color="D9D9D9"),
+        top=Side(style="thin", color="D9D9D9"),
+        bottom=Side(style="thin", color="D9D9D9")
+    )
+
+    for row in ws.iter_rows(min_row=2):
+        ws.row_dimensions[row[0].row].height = 24
+        for cell in row:
+            cell.font = body_font
+            cell.border = thin_border
+            if cell.column_letter in ["A", "B", "C", "E"]:
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = "1:1"
+
+    out_buffer = BytesIO()
+    wb.save(out_buffer)
+    out_buffer.seek(0)
+    return out_buffer
+
+
+def create_pdf_download(df):
+    """
+    Generates a clean, landscape print-friendly PDF timetable BytesIO buffer.
+    """
+    cols = [c for c in ["EXAMS_DATE", "SESSION_TIME", "COURSE_CODE", "COURSE_TITLE", "VENUE"] if c in df.columns]
+    df_export = df[cols].copy()
+
+    if "EXAMS_DATE" in df_export.columns:
+        df_export["EXAMS_DATE"] = df_export["EXAMS_DATE"].apply(
+            lambda d: d.strftime("%d/%m/%Y") if isinstance(d, (datetime.date, datetime.datetime)) else (str(d) if pd.notna(d) and d is not None else "")
+        )
+
+    col_rename = {
+        "EXAMS_DATE": "Exam Date",
+        "SESSION_TIME": "Session Time",
+        "COURSE_CODE": "Course Code",
+        "COURSE_TITLE": "Course Title",
+        "VENUE": "Venue"
+    }
+    df_export.rename(columns=col_rename, inplace=True)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(letter),
+        leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor('#1F4E78'),
+        spaceAfter=4
+    )
+    subtitle_style = ParagraphStyle(
+        'DocSubTitle',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=10,
+        leading=12,
+        textColor=colors.HexColor('#555555'),
+        spaceAfter=12
+    )
+    header_cell_style = ParagraphStyle(
+        'HeaderCell',
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        leading=12,
+        textColor=colors.white,
+        alignment=1
+    )
+    body_cell_center = ParagraphStyle(
+        'BodyCellCenter',
+        fontName='Helvetica',
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor('#222222'),
+        alignment=1
+    )
+    body_cell_left = ParagraphStyle(
+        'BodyCellLeft',
+        fontName='Helvetica',
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor('#222222'),
+        alignment=0
+    )
+
+    headers = list(df_export.columns)
+    table_data = [[Paragraph(h, header_cell_style) for h in headers]]
+
+    for _, row in df_export.iterrows():
+        row_data = []
+        for col_name in headers:
+            val_str = str(row.get(col_name, "") or "")
+            if col_name == "Course Title":
+                row_data.append(Paragraph(val_str, body_cell_left))
+            else:
+                row_data.append(Paragraph(val_str, body_cell_center))
+        table_data.append(row_data)
+
+    col_widths = [90, 110, 90, 270, 160]
+
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F4E78')),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D9D9D9')),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+    ]))
+
+    elements = [
+        Paragraph("MKU Exam Timetable", title_style),
+        Paragraph(f"Filtered Exam Schedule ({len(df_export)} units selected)", subtitle_style),
+        Spacer(1, 6),
+        t
+    ]
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
+# ==========================================
+# 5. Streamlit User Interface
 # ==========================================
 
 def main():
@@ -380,7 +559,6 @@ def main():
             file_bytes = uploaded_file.read()
             xl, sheet_scores, best_sheet = detect_timetable_sheets(file_bytes, uploaded_file.name)
 
-            # Allow sheet selection if multiple sheets exist
             if len(xl.sheet_names) > 1:
                 selected_sheet = st.selectbox(
                     "Select Timetable Worksheet",
@@ -412,29 +590,54 @@ def main():
             if selected_units:
                 filtered = df_clean[df_clean["COURSE_CODE"].isin(selected_units)].copy()
 
-                # Sort by date and time where possible
                 sort_cols = [c for c in ["EXAMS_DATE", "SESSION_TIME"] if c in filtered.columns]
                 if sort_cols:
                     filtered = filtered.sort_values(by=sort_cols)
 
-                # Filter display columns
                 cols_to_show = [c for c in ["EXAMS_DATE", "SESSION_TIME", "COURSE_CODE", "COURSE_TITLE", "VENUE"] if c in filtered.columns]
                 
+                preview_df = filtered[cols_to_show].copy()
+                if "EXAMS_DATE" in preview_df.columns:
+                    preview_df["EXAMS_DATE"] = preview_df["EXAMS_DATE"].apply(
+                        lambda d: d.strftime("%d/%m/%Y") if isinstance(d, (datetime.date, datetime.datetime)) else (str(d) if pd.notna(d) and d is not None else "")
+                    )
+
                 st.subheader("Your Filtered Exam Timetable")
-                st.dataframe(filtered[cols_to_show], use_container_width=True)
-
-                # Export to Excel buffer
-                buffer = BytesIO()
-                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    filtered[cols_to_show].to_excel(writer, index=False, sheet_name="My Timetable")
-                buffer.seek(0)
-
-                st.download_button(
-                    label="Download Filtered Timetable as Excel",
-                    data=buffer,
-                    file_name="my_exam_timetable.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                st.dataframe(
+                    preview_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "EXAMS_DATE": st.column_config.TextColumn("Exam Date"),
+                        "SESSION_TIME": st.column_config.TextColumn("Session Time"),
+                        "COURSE_CODE": st.column_config.TextColumn("Course Code"),
+                        "COURSE_TITLE": st.column_config.TextColumn("Course Title"),
+                        "VENUE": st.column_config.TextColumn("Venue")
+                    }
                 )
+
+                st.subheader("Download your timetable:")
+                excel_buffer = create_excel_download(filtered)
+                pdf_buffer = create_pdf_download(filtered)
+
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    st.download_button(
+                        label="📄 Download as Excel",
+                        data=excel_buffer,
+                        file_name="my_exam_timetable.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+
+                with dl_col2:
+                    st.download_button(
+                        label="🔴 Download as PDF",
+                        data=pdf_buffer,
+                        file_name="my_exam_timetable.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
             else:
                 st.info("Please select at least one unit code above to view your timetable.")
 
